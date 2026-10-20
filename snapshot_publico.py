@@ -491,6 +491,7 @@ def _serie_publica(serie_fn, eleicao: str) -> list[dict]:
         pontos.append({
             "em": marca,
             "coletado_em": reg.get("coletado_em"),
+            "origem": "primeira_coleta",
             "pct_apurado": nac.get("pct_apurado"),
             "vv": nac.get("vv"),
             "candidatos": [{"nome": c.get("nome"), "pct": c.get("pct"),
@@ -522,6 +523,92 @@ def _fontes(eleicao: str) -> list[dict]:
         return []
 
 
+def retrato_vazio(eleicao: str, motivo: str | None = None) -> dict:
+    """Retrato explícito de "sem dado": campos vazios, nunca zero eleitoral.
+
+    A tela sabe dizer "sem dado" quando ``sem_dado`` é verdadeiro; o turno e a
+    tabela de fontes continuam visíveis para o leitor saber onde procurar.
+    """
+    eleicao = str(eleicao)
+    return {
+        "gerado_em": datetime.now(FUSO).replace(microsecond=0).isoformat(),
+        "fonte": "TSE — resultados.tse.jus.br (arquivos públicos por UF)",
+        "fonte_gerada_texto": None,
+        "eleicao": eleicao,
+        "turno": {"6257": "1º turno", "6258": "2º turno",
+                  "2022": "1º turno (referência)"}.get(eleicao, f"turno {eleicao}"),
+        "andamento": None,
+        "proximo": None,
+        "nacional": {"pct_apurado": None, "st": None, "ts": None, "vv": None,
+                     "tv": None, "vb": None, "tvn": None, "te": None,
+                     "comparecimento": None, "candidatos": []},
+        "regioes": [],
+        "ufs": [],
+        "insights": [],
+        "serie": [],
+        "mapa": _mapa(),
+        "fontes_ufs": _fontes(eleicao),
+        "conferencia": None,
+        "erros_coleta": [motivo] if motivo else [],
+        "motivo": motivo,
+        "sem_dado": True,
+    }
+
+
+def _retrato_base(principal: dict, serie_fn, grava_serie, verboso: bool = False,
+                  proximo: dict | None = None, sem_dado: bool = False) -> dict:
+    """Monta o retrato público a partir de um snapshot já coletado."""
+    nacional = _normaliza(principal)
+    if sem_dado:
+        # Não transforma "ainda não começou" em placar de zeros.
+        for campo in ("pct_apurado", "st", "ts", "vv", "tv", "vb", "tvn", "te",
+                      "comparecimento"):
+            nacional[campo] = None
+        nacional["candidatos"] = []
+    vv_nacional = nacional.get("vv")
+    ufs_brutas = {} if sem_dado else (principal.get("ufs") or {})
+    regioes = agrega_regioes(ufs_brutas, vv_nacional)
+    ufs = quadro_ufs(ufs_brutas)
+
+    # série append-only: só cresce quando o TSE publica uma parcial nova
+    try:
+        if grava_serie and grava_serie(principal) and verboso:
+            print(f"  série: novo ponto gravado ({principal.get('fonte_gerada_texto')})")
+    except Exception as exc:
+        if verboso:
+            print(f"  aviso: não gravou a série: {exc}")
+    serie = [] if sem_dado else _serie_publica(serie_fn, str(nacional.get("eleicao")))
+
+    if verboso:
+        print(f"  quadro {nacional.get('eleicao')} ({nacional.get('turno')}) · "
+              f"{len(ufs_brutas)} UFs · {nacional.get('pct_apurado')}% apurado · "
+              f"série {len(serie)} pontos")
+        if principal.get("erros"):
+            print(f"  erros de coleta: {principal['erros']}")
+
+    return {
+        "gerado_em": datetime.now(FUSO).replace(microsecond=0).isoformat(),
+        "fonte": "TSE — resultados.tse.jus.br (arquivos públicos por UF)",
+        "fonte_gerada_texto": nacional.get("fonte_gerada_texto"),
+        "eleicao": nacional.get("eleicao"),
+        "turno": nacional.get("turno"),
+        "andamento": nacional.get("andamento"),
+        "proximo": proximo,
+        "nacional": {k: nacional[k] for k in
+                     ("pct_apurado", "st", "ts", "vv", "tv", "vb", "tvn", "te",
+                      "comparecimento", "candidatos")},
+        "regioes": regioes,
+        "ufs": ufs,
+        "insights": monta_insights(nacional, regioes, ufs, proximo),
+        "serie": serie,
+        "mapa": _mapa(),
+        "fontes_ufs": _fontes(str(nacional.get("eleicao") or "6257")),
+        "conferencia": principal.get("conferencia"),
+        "erros_coleta": principal.get("erros") or [],
+        "sem_dado": bool(sem_dado),
+    }
+
+
 def montar(verboso: bool = False) -> dict:
     coleta, ativa_fn, serie_fn, grava_serie = _motor()
 
@@ -547,47 +634,27 @@ def montar(verboso: bool = False) -> dict:
                 print(f"  aviso: coleta do pleito anterior falhou: {exc}")
             principal = snap
 
-    nacional = _normaliza(principal)
-    vv_nacional = nacional.get("vv")
-    ufs_brutas = principal.get("ufs") or {}
-    regioes = agrega_regioes(ufs_brutas, vv_nacional)
-    ufs = quadro_ufs(ufs_brutas)
-    # série append-only: só cresce quando o TSE publica uma parcial nova
-    try:
-        if grava_serie and grava_serie(principal) and verboso:
-            print(f"  série: novo ponto gravado ({principal.get('fonte_gerada_texto')})")
-    except Exception as exc:
-        if verboso:
-            print(f"  aviso: não gravou a série: {exc}")
-    serie = _serie_publica(serie_fn, str(nacional.get("eleicao")))
-
     if verboso:
-        print(f"  eleicao ativa {ativa} · quadro {nacional.get('eleicao')} "
-              f"({nacional.get('turno')}) · {len(ufs_brutas)} UFs · "
-              f"{nacional.get('pct_apurado')}% apurado · série {len(serie)} pontos")
-        if principal.get("erros"):
-            print(f"  erros de coleta: {principal['erros']}")
+        print(f"  eleicao ativa {ativa} · quadro {principal.get('eleicao')}")
+    return _retrato_base(principal, serie_fn, grava_serie, verboso=verboso,
+                         proximo=proximo, sem_dado=not _tem_votos(principal))
 
-    return {
-        "gerado_em": datetime.now(FUSO).replace(microsecond=0).isoformat(),
-        "fonte": "TSE — resultados.tse.jus.br (arquivos públicos por UF)",
-        "fonte_gerada_texto": nacional.get("fonte_gerada_texto"),
-        "eleicao": nacional.get("eleicao"),
-        "turno": nacional.get("turno"),
-        "andamento": nacional.get("andamento"),
-        "proximo": proximo,
-        "nacional": {k: nacional[k] for k in
-                     ("pct_apurado", "st", "ts", "vv", "tv", "vb", "tvn", "te",
-                      "comparecimento", "candidatos")},
-        "regioes": regioes,
-        "ufs": ufs,
-        "insights": monta_insights(nacional, regioes, ufs, proximo),
-        "serie": serie,
-        "mapa": _mapa(),
-        "fontes_ufs": _fontes(str(nacional.get("eleicao") or "6257")),
-        "conferencia": principal.get("conferencia"),
-        "erros_coleta": principal.get("erros") or [],
-    }
+
+def montar_eleicao(eleicao: str, verboso: bool = False) -> dict:
+    """Retrato de UM turno pedido pela tela (não decide a eleição ativa).
+
+    É o mesmo mecanismo ``_motor()`` da coleta normal: se ``coleta_presidente.py``
+    existir, usa o coletor por UF; senão, o coletor de reserva embutido.
+    """
+    coleta, _ativa_fn, serie_fn, grava_serie = _motor()
+    eleicao = str(eleicao)
+    snap = coleta(eleicao)
+    if not _tem_votos(snap):
+        # A série pode até existir de uma coleta anterior; o retrato, não.
+        if verboso:
+            print(f"  eleicao {eleicao}: sem votos publicados (sem dado)")
+        return retrato_vazio(eleicao, "o TSE ainda não publicou votos deste turno")
+    return _retrato_base(snap, serie_fn, grava_serie, verboso=verboso)
 
 
 def grava(dados: dict, caminho: Path = SAIDA) -> Path:

@@ -36,15 +36,24 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 AQUI = Path(__file__).resolve().parent
 sys.path.insert(0, str(AQUI))
 
+import fontes_ufs as fu              # noqa: E402
 import metricas_publico as mp          # noqa: E402
 import snapshot_publico as sp          # noqa: E402
 
 PORTA = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("PORT", "8099"))
 RETRATO = Path(os.environ.get("PAINEL_PUBLICO_JSON", AQUI / "dados" / "publico.json"))
+SERIE_2022 = Path(os.environ.get(
+    "PAINEL_SERIE_2022",
+    Path.home() / ".hermes" / "eleicao_presidente" / "serie_historica_2022.jsonl",
+))
+# Cópia de trabalho dentro do repositório: útil quando o diretório do painel não
+# é gravável (por exemplo, em ambiente de desenvolvimento com home somente leitura).
+SERIE_2022_LOCAL = AQUI / "dados" / "serie_historica_2022.jsonl"
 CONFIG = Path(os.environ.get("PAINEL_CONFIG", Path.home() / ".hermes" / "painel_publico"
                              / "config.json"))
 FUSO = timezone(timedelta(hours=-3))
@@ -63,6 +72,16 @@ TITULO = "Eleição 2026 · Presidente"
 CANAL_YOUTUBE = "https://www.youtube.com/@belmino.c.f"
 
 _CACHE: dict[str, object] = {"retrato": None, "mtime": 0.0, "erro": None, "quando": None}
+# Retratos por turno pedido (6257/6258). A coleta é cara (28 arquivos do TSE),
+# então cada turno tem seu próprio cache com validade adaptativa.
+_CACHE_EL: dict[str, dict] = {}
+_LOCK_EL = threading.Lock()
+_LOCK_COLETA = threading.Lock()
+# Cache curto da eleição ativa: define o turno padrão do seletor.
+_CACHE_ATIVA: dict[str, object] = {"quando": 0.0, "eleicao": "6257"}
+_LOCK_ATIVA = threading.Lock()
+# Série histórica de 2022 (JSONL grande): recarrega só quando o arquivo muda.
+_CACHE_2022: dict[str, object] = {"mtime": 0.0, "dados": None}
 
 
 # ------------------------------------------------------------------ utilidades
@@ -112,6 +131,121 @@ def retrato() -> dict | None:
         return _CACHE["retrato"] if isinstance(_CACHE["retrato"], dict) else None
     _CACHE["retrato"], _CACHE["mtime"] = dados, mtime
     return dados
+
+
+def _validade(eleicao: str) -> int:
+    """Turno em andamento merece cache curto; turno encerrado pode esperar."""
+    return INTERVALO_VIVO if str(eleicao) == "6258" else INTERVALO_PARADO
+
+
+def _cache_el_vivo(eleicao: str) -> dict | None:
+    item = _CACHE_EL.get(str(eleicao))
+    if not item:
+        return None
+    if time.time() - float(item.get("quando") or 0) >= _validade(eleicao):
+        return None
+    return item.get("dados") if isinstance(item.get("dados"), dict) else None
+
+
+def retrato_eleicao(eleicao: str) -> dict:
+    """Retrato de um turno específico, usando o ``_motor()`` do snapshot.
+
+    Se o TSE não tiver publicado nada para o turno, devolve um retrato vazio com
+    ``sem_dado=True`` — a tela diz "sem dado", nunca um placar de zeros.
+    """
+    eleicao = str(eleicao)
+    pronto = _cache_el_vivo(eleicao)
+    if pronto is not None:
+        return pronto
+
+    with _LOCK_COLETA:
+        # Outra thread pode ter coletado enquanto esperávamos o lock.
+        pronto = _cache_el_vivo(eleicao)
+        if pronto is not None:
+            return pronto
+        try:
+            dados = sp.montar_eleicao(eleicao, verboso=True)
+        except Exception as erro:
+            dados = sp.retrato_vazio(eleicao, f"{type(erro).__name__}: {erro}")
+        _CACHE_EL[eleicao] = {"quando": time.time(), "dados": dados}
+        return dados
+
+
+def eleicao_padrao() -> str:
+    """6258 quando o 2º turno já começou; senão 6257.
+
+    Usa exatamente ``snapshot_publico.eleicao_ativa_local()`` (com cache curto
+    para não consultar o TSE a cada visita).
+    """
+    agora = time.time()
+    with _LOCK_ATIVA:
+        if agora - float(_CACHE_ATIVA.get("quando") or 0) < 120:
+            return str(_CACHE_ATIVA.get("eleicao") or "6257")
+    try:
+        ativa = sp.eleicao_ativa_local()
+    except Exception:
+        ativa = "6257"
+    ativa = "6258" if str(ativa) == "6258" else "6257"
+    with _LOCK_ATIVA:
+        _CACHE_ATIVA["quando"], _CACHE_ATIVA["eleicao"] = agora, ativa
+    return ativa
+
+
+def serie_2022() -> list[dict]:
+    """Lê o JSONL da referência de 2022 (deduplicado por ``em``)."""
+    caminho = SERIE_2022 if SERIE_2022.exists() else SERIE_2022_LOCAL
+    try:
+        mtime = caminho.stat().st_mtime
+    except OSError:
+        return []
+    if _CACHE_2022.get("dados") is not None and mtime == _CACHE_2022.get("mtime"):
+        return _CACHE_2022["dados"]       # type: ignore[return-value]
+    pontos, vistos = [], set()
+    try:
+        with caminho.open("r", encoding="utf-8") as arquivo:
+            for linha in arquivo:
+                linha = linha.strip()
+                if not linha:
+                    continue
+                try:
+                    reg = json.loads(linha)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(reg, dict):
+                    continue
+                em = reg.get("em")
+                if not em or em in vistos:
+                    continue
+                vistos.add(em)
+                pontos.append(reg)
+    except OSError:
+        return []
+    _CACHE_2022["mtime"], _CACHE_2022["dados"] = mtime, pontos
+    return pontos
+
+
+def _query(handler: BaseHTTPRequestHandler) -> dict:
+    return parse_qs(urlparse(handler.path or "").query)
+
+
+def _eleicao_pedida(handler: BaseHTTPRequestHandler) -> str:
+    valores = _query(handler).get("eleicao") or [""]
+    return (valores[0] or "").strip()
+
+
+def _dados_para(handler: BaseHTTPRequestHandler) -> dict | None:
+    eleicao = _eleicao_pedida(handler)
+    if eleicao in ("6257", "6258"):
+        return retrato_eleicao(eleicao)
+    return retrato()
+
+
+def metricas_resumo() -> dict:
+    """Resumo anônimo; falha da estatística nunca derruba um bloco eleitoral."""
+    try:
+        return mp.resumo()
+    except Exception:
+        return {"hoje": {}, "total": {}, "regioes": [], "serie": [], "estados": []}
 
 
 # ---------------------------------------------------------------------- CSS/JS
@@ -208,25 +342,307 @@ font-weight:800;padding:12px 20px;border-radius:12px;font-size:15px;white-space:
 border-top:1px solid var(--borda);display:flex;flex-wrap:wrap;gap:8px 18px}
 .vazio{color:var(--fraco);font-size:14px}
 .carregando{color:var(--fraco);padding:28px 0;text-align:center}
+.turnos{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+.turno,.camada{appearance:none;cursor:pointer;font:inherit;font-size:13px;font-weight:700;
+color:var(--texto);background:#0b1424;border:1px solid var(--borda);border-radius:999px;
+padding:8px 14px;transition:filter .15s,background .15s}
+.turno:hover,.camada:hover{filter:brightness(1.18)}
+.turno.ativo{background:linear-gradient(96deg,var(--teal),var(--azul));border-color:transparent;
+color:#04121a}
+.camada.ativa{background:#123a52;border-color:#2ee6c5;color:#bffcf2}
+.selos{display:inline-flex;gap:5px;margin-left:8px;vertical-align:middle;flex-wrap:wrap}
+.selos .tag{margin-top:0;font-size:9px;padding:2px 6px}
+.barras-regiao{display:grid;gap:11px}
+.barra-regiao .rot{display:flex;justify-content:space-between;gap:10px;font-size:13px;
+align-items:baseline}
+.barra-regiao .rot b{font-size:14px}
+.barra-regiao .rot span{color:var(--fraco);font-size:12px;text-align:right}
+.barra-regiao .trilho{height:11px;border-radius:999px;background:#0a1120;border:1px solid var(--borda);
+overflow:hidden;margin-top:5px}
+.barra-regiao .trilho span{display:block;height:100%;border-radius:999px;
+background:linear-gradient(90deg,#1b7f74,var(--teal))}
+.barra-regiao.destaque-nordeste{background:#0d2a2a;border:1px solid #1c6155;border-radius:12px;
+padding:10px 11px;margin:0 -5px}
+.barra-regiao.destaque-nordeste .rot b{color:var(--teal)}
+.fenomeno{display:grid;gap:16px}
+.fenomeno .conta{background:#0b1424;border:1px solid var(--borda);border-radius:14px;
+padding:14px}
+.fenomeno .conta p{margin:0 0 10px;font-size:14.5px}
+.fenomeno .conta p:last-child{margin-bottom:0}
+.fenomeno .conta .tag{margin-right:6px}
+.serie-palco{min-height:180px}
+.grafico-serie{width:100%;height:auto;display:block;background:#0a1120;border:1px solid var(--borda);
+border-radius:14px}
+.serie-legenda{display:flex;gap:16px;flex-wrap:wrap;color:var(--fraco);font-size:13px;
+margin:0 0 10px}
+.serie-legenda b{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px}
+.ponto-unico{background:#0b1424;border:1px solid var(--borda);border-radius:14px;padding:16px}
+.ponto-unico .rot{color:var(--fraco);font-size:12px;letter-spacing:.06em;text-transform:uppercase;
+font-weight:700}
+.ponto-unico .val{font-size:34px;font-weight:800;letter-spacing:-.02em;margin:4px 0 6px;
+color:var(--teal)}
+.lista-serie{padding-left:18px;margin:10px 0 0;color:var(--fraco);font-size:13px}
+.lista-serie li{margin:5px 0}
+details{margin-top:10px}
+details summary{cursor:pointer;color:var(--teal);font-size:13px;font-weight:700}
+.tabela a{color:var(--teal);text-decoration:none}
+.tabela a:hover{text-decoration:underline}
+.fontes-uf .nome{color:var(--fraco);font-size:11.5px}
+.rodape a{color:var(--teal)}
 """
 
-JS = """
+JS = r"""
 (function(){
   var alvoTopo = document.getElementById('topo');
+  var alvoMeio = document.getElementById('meio');
   var alvoBaixo = document.getElementById('baixo');
   var selo = document.getElementById('atualizado');
-  function troca(alvo, url){
+  var eleicaoAtual = document.documentElement.getAttribute('data-eleicao') || '6257';
+
+  function url(base){ return base + '?eleicao=' + encodeURIComponent(eleicaoAtual); }
+  function troca(alvo, endereco){
     if(!alvo) return;
-    fetch(url, {cache:'no-store'}).then(function(r){
+    fetch(endereco, {cache:'no-store'}).then(function(r){
       if(!r.ok) throw new Error('status '+r.status);
       return r.text();
-    }).then(function(txt){ if(txt && txt.trim()) alvo.innerHTML = txt; }).catch(function(){});
+    }).then(function(txt){
+      if(txt && txt.trim()) alvo.innerHTML = txt;
+      if(alvo === alvoBaixo && window.PainelSerie) window.PainelSerie.monta();
+    }).catch(function(){});
+  }
+  function marcaTurno(){
+    var botoes = document.querySelectorAll('.turno');
+    for(var i=0;i<botoes.length;i++){
+      var b = botoes[i];
+      var ativo = b.getAttribute('data-eleicao') === eleicaoAtual;
+      b.className = 'turno' + (ativo ? ' ativo' : '');
+      b.setAttribute('aria-pressed', ativo ? 'true' : 'false');
+    }
+  }
+  function seleciona(nova){
+    if(!nova || nova === eleicaoAtual) return;
+    eleicaoAtual = nova;
+    marcaTurno();
+    atualiza();
   }
   function atualiza(){
-    troca(alvoTopo, 'topo.html');
-    troca(alvoBaixo, 'blocos.html');
+    troca(alvoTopo, url('topo.html'));
+    troca(alvoMeio, url('meio.html'));
+    troca(alvoBaixo, url('blocos.html'));
     if(selo) selo.textContent = new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
   }
+  document.addEventListener('click', function(ev){
+    var alvo = ev.target;
+    while(alvo && alvo !== document){
+      if(alvo.classList && alvo.classList.contains('turno')){
+        ev.preventDefault();
+        seleciona(alvo.getAttribute('data-eleicao'));
+        return;
+      }
+      alvo = alvo.parentNode;
+    }
+  });
+
+  window.PainelSerie = (function(){
+    var camada = '2026';
+    try { camada = sessionStorage.getItem('painel-camada-serie') || '2026'; } catch(e){}
+    var cache2022 = null;
+    var buscando = false;
+
+    function esc(t){
+      return String(t==null?'':t).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    function cfg(){
+      var el = document.getElementById('serie-config');
+      if(!el) return null;
+      try { return JSON.parse(el.textContent); } catch(e){ return null; }
+    }
+    function guarda(){ try { sessionStorage.setItem('painel-camada-serie', camada); } catch(e){} }
+    function pintaBotoes(){
+      var botoes = document.querySelectorAll('.camada');
+      for(var i=0;i<botoes.length;i++){
+        var b = botoes[i];
+        var ativo = b.getAttribute('data-camada') === camada;
+        b.className = 'camada' + (ativo ? ' ativa' : '');
+        b.setAttribute('aria-pressed', ativo ? 'true' : 'false');
+      }
+    }
+    function fmt(v,c){
+      if(v===null || v===undefined || isNaN(v)) return '—';
+      return Number(v).toFixed(c==null?2:c).replace('.',',');
+    }
+    function origemDe(p){ return (p && p.origem) || 'primeira_coleta'; }
+    function resumoOrigem(pontos){
+      var mapa = {};
+      for(var i=0;i<pontos.length;i++){ var o=origemDe(pontos[i]); mapa[o]=(mapa[o]||0)+1; }
+      var partes=[];
+      for(var k in mapa){ if(mapa.hasOwnProperty(k)) partes.push(k+' ('+mapa[k]+')'); }
+      return partes.join(' · ');
+    }
+    function validos(pontos){
+      return (pontos||[]).filter(function(p){
+        return p && p.pct_apurado !== null && p.pct_apurado !== undefined && !isNaN(p.pct_apurado);
+      });
+    }
+    function desenha(pontos, c, rotulo){
+      var palco = document.getElementById('serie-palco');
+      if(!palco) return;
+      var ps = validos(pontos);
+      if(!ps.length){
+        palco.innerHTML = '<p class="vazio">sem dado da série para '+esc(rotulo)+'.</p>';
+        return;
+      }
+      if(ps.length === 1){
+        var p = ps[0];
+        var cands = (p.candidatos||[]).map(function(x){ return esc(x.nome)+' '+fmt(x.pct)+'%'; }).join(' · ');
+        palco.innerHTML = '<div class="ponto-unico"><div class="rot">série começa em '+
+          esc(p.em || (c && c.fonte) || '—')+'</div><div class="val">'+fmt(p.pct_apurado)+
+          '% apurado</div><p class="nota">'+esc(cands || 'sem candidatos publicados')+
+          ' · origem: <b>'+esc(origemDe(p))+'</b></p><p class="nota">Existe 1 ponto real. '+
+          'A curva ganha corpo quando o TSE publicar uma nova parcial; nada é interpolado.</p></div>';
+        return;
+      }
+
+      var nomes = [];
+      if(rotulo !== '2022' && c && c.nomes) nomes = c.nomes.slice(0,2);
+      if(!nomes.length){
+        for(var i=0;i<ps.length;i++){
+          var cs=ps[i].candidatos||[];
+          for(var j=0;j<cs.length;j++){ if(nomes.indexOf(cs[j].nome)<0) nomes.push(cs[j].nome); }
+        }
+        nomes=nomes.slice(0,2);
+      }
+      var mapaCores = (c && c.cores) || {};
+      if(rotulo === '2022') mapaCores = {'LULA':'#ff5a67','JAIR BOLSONARO':'#4f8cff'};
+      function cor(nome, indice){
+        if(mapaCores[nome]) return mapaCores[nome];
+        var paleta = ['#4f8cff','#ff5a67','#f5c542','#3ddc97'];
+        return paleta[indice % paleta.length];
+      }
+
+      var maxY = 0;
+      for(var i=0;i<ps.length;i++){
+        var cs=ps[i].candidatos||[];
+        for(var j=0;j<cs.length;j++){
+          if(cs[j].pct!==null && cs[j].pct!==undefined) maxY=Math.max(maxY, Number(cs[j].pct));
+        }
+      }
+      maxY = Math.min(100, Math.max(50, Math.ceil((maxY+3)/10)*10));
+      var W=720,H=300,L=46,R=16,T=18,B=38;
+      var w=W-L-R, h=H-T-B;
+      function x(v){ return L + w * Math.max(0,Math.min(100,Number(v)))/100; }
+      function y(v){ return T + h - h * Math.max(0,Math.min(maxY,Number(v)))/maxY; }
+      var svg=[];
+      svg.push('<svg class="grafico-serie" viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Curva da apuração por candidato">');
+      for(var g=0;g<=4;g++){
+        var yy=T+h*g/4, val=maxY*(1-g/4);
+        svg.push('<line x1="'+L+'" y1="'+yy.toFixed(1)+'" x2="'+(L+w)+'" y2="'+yy.toFixed(1)+'" stroke="#1f2b45" stroke-width="1"/>');
+        svg.push('<text x="'+(L-8)+'" y="'+(yy+4).toFixed(1)+'" fill="#93a3c4" font-size="11" text-anchor="end">'+fmt(val,0)+'%</text>');
+      }
+      for(var gx=0;gx<=4;gx++){
+        var xx=L+w*gx/4;
+        svg.push('<line x1="'+xx.toFixed(1)+'" y1="'+T+'" x2="'+xx.toFixed(1)+'" y2="'+(T+h)+'" stroke="#162034" stroke-width="1"/>');
+        svg.push('<text x="'+xx.toFixed(1)+'" y="'+(T+h+20)+'" fill="#93a3c4" font-size="11" text-anchor="middle">'+(gx*25)+'%</text>');
+      }
+      svg.push('<text x="'+(L+w/2)+'" y="'+(H-4)+'" fill="#93a3c4" font-size="11" text-anchor="middle">seções apuradas (%)</text>');
+      svg.push('<text x="12" y="'+(T+h/2)+'" fill="#93a3c4" font-size="11" text-anchor="middle" transform="rotate(-90 12 '+(T+h/2)+')">votos válidos (%)</text>');
+
+      for(var ci=0;ci<nomes.length;ci++){
+        var nome=nomes[ci], corr=cor(nome,ci), d='', n=0, ultimo=null;
+        for(var i=0;i<ps.length;i++){
+          var cs=ps[i].candidatos||[], achou=null;
+          for(var j=0;j<cs.length;j++){ if(cs[j].nome===nome){ achou=cs[j]; break; } }
+          if(!achou || achou.pct===null || achou.pct===undefined) continue;
+          var px=x(ps[i].pct_apurado), py=y(achou.pct);
+          d += (n===0?'M':'L') + px.toFixed(2)+' '+py.toFixed(2)+' ';
+          n++; ultimo={x:px,y:py};
+        }
+        if(!n) continue;
+        svg.push('<path d="'+d.trim()+'" fill="none" stroke="'+corr+'" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>');
+        var passo=Math.max(1,Math.floor(ps.length/14));
+        for(var i=0;i<ps.length;i+=passo){
+          var cs=ps[i].candidatos||[], achou=null;
+          for(var j=0;j<cs.length;j++){ if(cs[j].nome===nome){ achou=cs[j]; break; } }
+          if(!achou || achou.pct===null || achou.pct===undefined) continue;
+          var px=x(ps[i].pct_apurado), py=y(achou.pct);
+          svg.push('<circle cx="'+px.toFixed(1)+'" cy="'+py.toFixed(1)+'" r="2.3" fill="'+corr+'"><title>'+
+            esc(ps[i].em||'—')+' · '+esc(nome)+' '+fmt(achou.pct)+'% · apurado '+fmt(ps[i].pct_apurado)+
+            '% · origem '+esc(origemDe(ps[i]))+'</title></circle>');
+        }
+        if(ultimo) svg.push('<text x="'+Math.min(W-4,ultimo.x+6).toFixed(1)+'" y="'+(ultimo.y-6).toFixed(1)+'" fill="'+corr+'" font-size="11" font-weight="700">'+esc(nome)+'</text>');
+      }
+      svg.push('</svg>');
+      var legend=[];
+      for(var ci=0;ci<nomes.length;ci++){
+        legend.push('<span><b style="background:'+cor(nomes[ci],ci)+'"></b>'+esc(nomes[ci])+'</span>');
+      }
+      var detalhes=[], ini=Math.max(0,ps.length-8);
+      for(var i=ini;i<ps.length;i++){
+        var p=ps[i], cs=p.candidatos||[], partes=[];
+        for(var j=0;j<cs.length;j++){
+          if(cs[j].pct!==null && cs[j].pct!==undefined) partes.push(esc(cs[j].nome)+' '+fmt(cs[j].pct)+'%');
+        }
+        detalhes.push('<li>'+esc(p.em||'—')+' — '+fmt(p.pct_apurado)+'% apurado · '+
+          (partes.join(' · ')||'sem candidatos')+' · <b>'+esc(origemDe(p))+'</b></li>');
+      }
+      palco.innerHTML =
+        '<div class="serie-legenda">'+legend.join('')+'</div>'+
+        svg.join('')+
+        '<p class="nota"><b>'+ps.length+'</b> ponto(s) reais de <b>'+esc(ps[0].em||'—')+
+        '</b> a <b>'+esc(ps[ps.length-1].em||'—')+'</b>. Origem: '+esc(resumoOrigem(ps))+
+        '. Sem interpolação entre pontos.</p>'+
+        '<details><summary>Últimos pontos e a origem de cada um</summary><ul class="lista-serie">'+
+        detalhes.join('')+'</ul></details>';
+    }
+    function busca2022(c){
+      var palco=document.getElementById('serie-palco');
+      if(cache2022){ desenha(cache2022, c, '2022'); return; }
+      if(buscando) return;
+      buscando=true;
+      if(palco) palco.innerHTML='<p class="vazio">carregando a série histórica de 2022…</p>';
+      fetch('serie.json?eleicao=2022', {cache:'no-store'}).then(function(r){
+        if(!r.ok) throw new Error('status '+r.status);
+        return r.json();
+      }).then(function(d){
+        cache2022 = (d && d.pontos) || [];
+        buscando=false;
+        desenha(cache2022, c, '2022');
+      }).catch(function(){
+        buscando=false;
+        if(palco) palco.innerHTML='<p class="vazio">não foi possível carregar a série de 2022 agora.</p>';
+      });
+    }
+    function render(){
+      var c=cfg();
+      if(!c){
+        var p=document.getElementById('serie-palco');
+        if(p) p.innerHTML='<p class="vazio">sem dado da série.</p>';
+        return;
+      }
+      if(camada==='2022') busca2022(c);
+      else desenha(c.serie||[], c, '2026');
+    }
+    function monta(){
+      var palco=document.getElementById('serie-palco');
+      if(!palco) return;
+      var botoes=document.querySelectorAll('.camada');
+      for(var i=0;i<botoes.length;i++){
+        botoes[i].onclick=function(){
+          camada=this.getAttribute('data-camada')||'2026';
+          guarda(); pintaBotoes(); render();
+        };
+      }
+      pintaBotoes();
+      render();
+    }
+    return {monta:monta};
+  })();
+
+  marcaTurno();
+  if(window.PainelSerie) window.PainelSerie.monta();
+  var servido = alvoTopo && alvoTopo.getAttribute('data-eleicao');
+  if(!servido || servido !== eleicaoAtual) atualiza();
   setInterval(atualiza, 60000);
   document.addEventListener('visibilitychange', function(){ if(!document.hidden) atualiza(); });
 })();
@@ -234,6 +650,17 @@ JS = """
 
 
 # ------------------------------------------------------------------- pedaços
+def _selos(*tipos: str) -> str:
+    """Selos de procedência do bloco: TSE, CONTA e ESTIMATIVA."""
+    rotulos = {"TSE": ("TSE", "t-dado"), "CONTA": ("CONTA", "t-conta"),
+               "ESTIMATIVA": ("ESTIMATIVA", "t-estimativa")}
+    partes = []
+    for tipo in tipos:
+        nome, classe = rotulos.get(tipo, (tipo, "t-conta"))
+        partes.append(f'<span class="tag {classe}">{nome}</span>')
+    return f'<span class="selos">{"".join(partes)}</span>'
+
+
 def _insights(dados: dict) -> str:
     itens = dados.get("insights") or []
     if not itens:
@@ -301,7 +728,159 @@ def _linha_regioes(dados: dict) -> str:
     return f'<table class="tabela">{"".join(cab)}{"".join(linhas)}</table>'
 
 
+def _fenomeno(dados: dict) -> str:
+    """Painel do fenômeno: avanço por região + conta do que falta para virar.
+
+    Tudo sai dos números publicados: as barras são o % de seções apuradas por
+    região; a projeção de votos restantes é uma ESTIMATIVA com a premissa
+    escrita ao lado. Quando não falta seção, a conta não se aplica e o bloco
+    mostra o resultado oficial, sem inventar projeção.
+    """
+    nac = dados.get("nacional") or {}
+    candidatos = nac.get("candidatos") or []
+    regioes = dados.get("regioes") or []
+    ufs = dados.get("ufs") or []
+    if not candidatos:
+        return '<p class="vazio">sem dado para o painel do fenômeno neste turno.</p>'
+
+    primeiro = candidatos[0]
+    segundo = candidatos[1] if len(candidatos) > 1 else None
+
+    # 1) Regiões: ordem de entrada = % de seções já apuradas (maior primeiro).
+    com_pct = [r for r in regioes if r.get("pct_apurado") is not None]
+    com_pct.sort(key=lambda r: -float(r.get("pct_apurado") or 0))
+    barras = []
+    for r in com_pct:
+        nome_regiao = r.get("regiao") or "?"
+        p = max(0.0, min(100.0, float(r.get("pct_apurado") or 0)))
+        faltam = r.get("secoes_faltantes")
+        if faltam is None:
+            falta_txt = "seções faltantes sem dado"
+        elif faltam:
+            falta_txt = f"faltam {milhar(faltam)} seções"
+        else:
+            falta_txt = "sem seções faltantes"
+        destaque = " destaque-nordeste" if nome_regiao == "Nordeste" else ""
+        barras.append(
+            f'<div class="barra-regiao{destaque}">'
+            f'<div class="rot"><b>{esc(nome_regiao)}</b>'
+            f'<span>{pct(p)}% apurado · {esc(falta_txt)}</span></div>'
+            f'<div class="trilho"><span style="width:{p:.2f}%"></span></div></div>')
+    bloco_barras = (
+        f'<div class="barras-regiao">{"".join(barras)}</div>'
+        f'<p class="nota">Ordem de entrada das regiões pelo percentual de seções '
+        f'já apuradas. O <b>Nordeste</b> fica em destaque.</p>'
+        if barras else '<p class="vazio">sem dado por região.</p>')
+
+    # 2) Votos válidos restantes, UF por UF: (vv/st) × seções que faltam.
+    por_uf = []
+    for u in ufs:
+        st, ts, vv = u.get("st"), u.get("ts"), u.get("vv")
+        if st is None or ts is None or vv is None or int(st) <= 0:
+            continue
+        faltam = max(0, int(ts) - int(st))
+        media = float(vv) / float(st)
+        por_uf.append({
+            "uf": u.get("uf"), "faltam": faltam, "media": media,
+            "restante": media * faltam,
+        })
+    por_uf.sort(key=lambda x: (-x["restante"], str(x["uf"] or "")))
+    restante_total = sum(x["restante"] for x in por_uf)
+
+    if por_uf:
+        faltam_total = sum(x["faltam"] for x in por_uf)
+    else:
+        ts, st = nac.get("ts"), nac.get("st")
+        faltam_total = (max(0, int(ts) - int(st))
+                        if ts is not None and st is not None else None)
+
+    def resultado_oficial() -> str:
+        partes = [
+            f'{esc(primeiro.get("nome"))} ({esc(primeiro.get("partido"))}) '
+            f'{milhar(primeiro.get("votos"))} votos ({pct(primeiro.get("pct"), 2)}%)'
+        ]
+        if segundo:
+            partes.append(
+                f'{esc(segundo.get("nome"))} ({esc(segundo.get("partido"))}) '
+                f'{milhar(segundo.get("votos"))} votos ({pct(segundo.get("pct"), 2)}%)')
+        return " · ".join(partes)
+
+    conta = []
+    if faltam_total == 0:
+        conta.append(
+            f'<p><span class="tag t-dado">TSE</span> A conta de votos restantes '
+            f'<b>não se aplica</b>: o TSE já apurou 100% das seções. '
+            f'Resultado oficial: {resultado_oficial()}.</p>')
+    elif faltam_total is None:
+        conta.append(
+            '<p><span class="tag t-dado">TSE</span> Sem dado de seções faltantes '
+            'para este turno; não há conta a fazer.</p>')
+    elif not segundo:
+        conta.append(
+            '<p><span class="tag t-dado">TSE</span> Só há um candidato com votos '
+            'publicados; não existe 2º colocado para comparar.</p>')
+    elif primeiro.get("votos") is None or segundo.get("votos") is None:
+        conta.append(
+            '<p><span class="tag t-dado">TSE</span> Votos de 1º ou 2º ainda não '
+            'publicados; a conta fica para a próxima parcial.</p>')
+    else:
+        diff = int(primeiro.get("votos") or 0) - int(segundo.get("votos") or 0)
+        pp = float(primeiro.get("pct") or 0) - float(segundo.get("pct") or 0)
+        conta.append(
+            f'<p><span class="tag t-conta">CONTA</span> '
+            f'{esc(primeiro.get("nome"))} está <b>{milhar(abs(diff))} votos</b> '
+            f'({pct(abs(pp), 2)} ponto(s)) à frente de '
+            f'{esc(segundo.get("nome"))}.</p>')
+        if restante_total > 0:
+            necessario = 100.0 * diff / restante_total
+            if necessario <= 100:
+                frase = (f'O 2º colocado precisaria de <b>{pct(necessario)}%</b> '
+                         f'dos {milhar(int(round(restante_total)))} votos válidos '
+                         f'restantes estimados para empatar.')
+            else:
+                frase = (f'O 2º colocado precisaria de <b>{pct(necessario)}%</b> '
+                         f'dos {milhar(int(round(restante_total)))} votos válidos '
+                         f'restantes estimados — mais de 100%, então nem todos os '
+                         f'votos restantes bastariam pela premissa.')
+            conta.append(f'<p><span class="tag t-estimativa">ESTIMATIVA</span> {frase}</p>')
+            conta.append(
+                '<p class="nota"><b>Premissa da estimativa:</b> os votos válidos '
+                'restantes de cada UF são a média de votos válidos por seção já '
+                'apurada (vv ÷ st) multiplicada pelas seções que faltam. O 1º '
+                'colocado não recebe nenhum desses votos; é o mínimo que o 2º '
+                'precisa para empatar. Projeção, não resultado.</p>')
+        else:
+            conta.append(
+                '<p><span class="tag t-estimativa">ESTIMATIVA</span> Sem base para '
+                'estimar votos restantes: nenhuma UF tem seção apurada com votos '
+                'válidos publicados.</p>')
+
+    tabela = ""
+    if por_uf and faltam_total:
+        linhas = []
+        for x in por_uf:
+            linhas.append(
+                f'<tr><td><b>{esc(x["uf"])}</b></td>'
+                f'<td class="dir">{milhar(x["faltam"])}</td>'
+                f'<td class="dir">{pct(x["media"])}</td>'
+                f'<td class="dir">{milhar(int(round(x["restante"])))}</td></tr>')
+        tabela = (
+            '<details><summary>Ver a conta por UF ('
+            f'{len(por_uf)} UFs)</summary>'
+            '<table class="tabela"><tr><th>UF</th><th class="dir">Seções faltando</th>'
+            '<th class="dir">Votos válidos por seção</th>'
+            '<th class="dir">Válidos restantes estimados</th></tr>'
+            f'{"".join(linhas)}</table>'
+            '<p class="nota">A soma das UFs é a base da estimativa; UF sem seção '
+            'apurada fica fora da conta.</p></details>')
+
+    return (f'<div class="fenomeno">{bloco_barras}'
+            f'<div class="conta">{"".join(conta)}{tabela}</div></div>')
+
+
 def _mapa(dados: dict) -> str:
+    if dados.get("sem_dado"):
+        return ""
     mapa = dados.get("mapa") or {}
     ufs = mapa.get("ufs") or {}
     if not ufs:
@@ -344,24 +923,77 @@ def _estados(dados: dict) -> str:
     return f'<div class="grade-ufs">{"".join(blocos)}</div>'
 
 
+def _fontes(dados: dict) -> str:
+    """As 27 UFs com o site do TRE e o JSON público do TSE daquele estado."""
+    eleicao = str(dados.get("eleicao") or "6257")
+    linhas = dados.get("fontes_ufs") or []
+    # Garante que os links são do turno que está na tela, não de um retrato antigo.
+    if (len(linhas) != 27
+            or any(f"/{eleicao}/" not in str(linha.get("json") or "") for linha in linhas)):
+        try:
+            linhas = fu.fontes(eleicao)
+        except Exception:
+            linhas = []
+    if not linhas:
+        return '<p class="vazio">sem dado das fontes por estado.</p>'
+    corpo = []
+    for linha in linhas:
+        corpo.append(
+            f'<tr><td><b>{esc(linha.get("uf"))}</b>'
+            f'<div class="nome">{esc(linha.get("nome"))}</div></td>'
+            f'<td>{esc(linha.get("regiao"))}</td>'
+            f'<td><a href="{esc(linha.get("tre"))}" target="_blank" '
+            f'rel="noopener noreferrer">TRE</a></td>'
+            f'<td><a href="{esc(linha.get("json"))}" target="_blank" '
+            f'rel="noopener noreferrer">JSON do TSE</a></td></tr>')
+    return (
+        '<table class="tabela fontes-uf"><tr><th>UF</th><th>Região</th>'
+        '<th>Fonte estadual</th><th>Dado oficial</th></tr>'
+        f'{"".join(corpo)}</table>'
+        f'<p class="nota">Os links abrem em nova aba. Portal de resultados do TSE: '
+        f'<a href="{esc(fu.PORTAL_TSE)}" target="_blank" rel="noopener noreferrer">'
+        f'resultados.tse.jus.br</a>.</p>')
+
+
 def _linha_tempo(dados: dict) -> str:
-    serie = dados.get("serie") or []
-    if len(serie) < 2:
-        return ('<p class="vazio">A linha do tempo aparece quando o TSE publica uma nova '
-                'parcial: por enquanto existe 1 ponto (a fonte não mudou desde a última '
-                'coleta). Nada é interpolado.</p>')
+    """Linha do tempo com duas camadas: série de 2026 e referência de 2022."""
     nac = dados.get("nacional") or {}
     cores = cores_candidatos(nac)
-    pontos = []
-    for p in serie:
-        marcas = []
-        for c in p.get("candidatos") or []:
-            marcas.append(f'{esc(c.get("nome"))} {pct(c.get("pct"), 2)}%')
-        pontos.append(f'<li>{esc(p.get("coletado_em") or p.get("em"))} — '
-                      f'{pct(p.get("pct_apurado"))}% apurado · {" · ".join(marcas)}</li>')
-    return (f'<ul class="vazio" style="padding-left:18px">{"".join(pontos)}</ul>'
-            f'<p class="nota">Cada ponto é uma leitura real do arquivo do TSE, gravada em '
-            f'série append-only. Sem interpolação entre pontos.</p>')
+    nomes = [c.get("nome") for c in (nac.get("candidatos") or [])[:2] if c.get("nome")]
+    config = {
+        "eleicao": dados.get("eleicao"),
+        "turno": dados.get("turno"),
+        "fonte": dados.get("fonte_gerada_texto"),
+        "nomes": nomes,
+        "cores": cores,
+        "serie": dados.get("serie") or [],
+    }
+    # json.dumps evita quebrar o <script> e preserva nomes com acento.
+    payload = json.dumps(config, ensure_ascii=False).replace("</", "<\\/")
+    serie = dados.get("serie") or []
+    if not serie:
+        fallback = ('<p class="vazio">A série de 2026 ainda não tem ponto: '
+                    'sem dado da fonte.</p>')
+    elif len(serie) == 1:
+        fallback = (
+            f'<p class="vazio">A série de 2026 começa em '
+            f'<b>{esc(serie[0].get("em") or dados.get("fonte_gerada_texto") or "—")}</b> '
+            f'(origem: {esc(serie[0].get("origem") or "primeira_coleta")}). '
+            f'Existe 1 ponto real; nada é interpolado.</p>')
+    else:
+        fallback = (f'<p class="vazio">{len(serie)} ponto(s) reais na série de 2026. '
+                    f'Abra a camada de 2022 para comparar com a referência do TSE.</p>')
+    return (
+        '<div class="camadas" role="group" aria-label="Camada da linha do tempo">'
+        '<button type="button" class="camada" data-camada="2026">'
+        '2026 (ao vivo, série do painel)</button>'
+        '<button type="button" class="camada" data-camada="2022">'
+        '2022 (referência TSE, 1º turno)</button></div>'
+        f'<div id="serie-palco" class="serie-palco">{fallback}</div>'
+        f'<script type="application/json" id="serie-config">{payload}</script>'
+        '<noscript><p class="vazio">Ative o JavaScript para ver as curvas; '
+        'os pontos continuam disponíveis em <code>/serie.json?eleicao=2022</code>.'
+        '</p></noscript>')
 
 
 def _metricas(m: dict) -> str:
@@ -451,38 +1083,58 @@ def _cabecalho_bloco(dados: dict) -> str:
 
 
 def bloco_topo(dados: dict) -> str:
-    """Topo dinâmico: cabeçalho da apuração, placar e insights. O mapa fica fixo no meio."""
+    """Topo dinâmico: cabeçalho da apuração, placar e insights."""
     return f"""
     {_cabecalho_bloco(dados)}
-    <div class="card"><h2>Placar</h2><div class="placar">{_placar(dados)}</div></div>
+    <div class="card"><h2>Placar {_selos("TSE")}</h2><div class="placar">{_placar(dados)}</div></div>
+    """
+
+
+def bloco_meio(dados: dict) -> str:
+    """Meio dinâmico: regiões, painel do fenômeno e mapa, nesta ordem."""
+    mapa = _mapa(dados)
+    mapa_html = ""
+    if mapa:
+        mapa_html = (
+            f'<div class="card"><h2>Mapa do momento {_selos("TSE")}</h2>{mapa}'
+            '<p class="nota">Cor = candidato que lidera no estado. Opacidade = parte '
+            'das seções já apuradas. Geometria pública; números do TSE.</p></div>')
+    return f"""
+    <div class="card"><h2>Por região {_selos("TSE", "CONTA")}</h2>{_linha_regioes(dados)}</div>
+    <div class="card"><h2>Painel do fenômeno {_selos("TSE", "CONTA", "ESTIMATIVA")}</h2>{_fenomeno(dados)}</div>
+    {mapa_html}
     """
 
 
 def bloco_baixo(dados: dict, metricas: dict) -> str:
-    """Resto: insights, regiões, estados, linha do tempo e o bloco de acesso."""
+    """Resto: insights, estados, fontes por UF, linha do tempo e acesso."""
     return f"""
-    <div class="card"><h2>O que os números dizem</h2>{_insights(dados)}</div>
-    <div class="card"><h2>Por região</h2>{_linha_regioes(dados)}</div>
-    <div class="card"><h2>Por estado</h2>{_estados(dados)}</div>
-    <div class="card"><h2>Linha do tempo</h2>{_linha_tempo(dados)}</div>
-    <div class="card"><h2>Acesso ao painel</h2>{_metricas(metricas)}</div>
+    <div class="card"><h2>O que os números dizem {_selos("TSE", "CONTA", "ESTIMATIVA")}</h2>{_insights(dados)}</div>
+    <div class="card"><h2>Por estado {_selos("TSE")}</h2>{_estados(dados)}</div>
+    <div class="card"><h2>Fontes por estado {_selos("TSE")}</h2>{_fontes(dados)}</div>
+    <div class="card"><h2>Linha do tempo {_selos("TSE", "CONTA")}</h2>{_linha_tempo(dados)}</div>
+    <div class="card"><h2>Acesso ao painel {_selos("CONTA")}</h2>{_metricas(metricas)}</div>
     """
 
 
-def shell(dados: dict | None, metricas: dict, cfg: dict) -> str:
+def shell(dados: dict | None, metricas: dict, cfg: dict, padrao: str = "6257") -> str:
     canal = (cfg.get("canal_url") or CANAL_YOUTUBE).strip() or CANAL_YOUTUBE
     rotulo = "Se inscreve no meu canal"
-    mapa = _mapa(dados) if dados else ""
     if dados:
         topo = bloco_topo(dados)
+        meio = bloco_meio(dados)
         baixo = bloco_baixo(dados, metricas)
     else:
         topo = ('<div class="card"><div class="carregando">Coletando os números do TSE…'
                 '<br><span class="vazio">a página recarrega sozinha em instantes.</span>'
                 '</div></div>')
+        meio = ""
         baixo = ""
+    servido = esc((dados or {}).get("eleicao") or "")
+    ativo1 = " ativo" if str(padrao) == "6257" else ""
+    ativo2 = " ativo" if str(padrao) == "6258" else ""
     return f"""<!doctype html>
-<html lang="pt-BR">
+<html lang="pt-BR" data-eleicao="{esc(padrao)}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -499,13 +1151,21 @@ def shell(dados: dict | None, metricas: dict, cfg: dict) -> str:
     <p class="sub">Apuração por estado e por região, sem chute: só o que o Tribunal
     Superior Eleitoral publica. Atualiza sozinho
     <span id="atualizado">agora</span>.</p>
+    <div class="turnos" role="group" aria-label="Turno">
+      <button type="button" class="turno{ativo1}" data-eleicao="6257"
+              aria-pressed="{'true' if str(padrao) == '6257' else 'false'}">1º turno</button>
+      <button type="button" class="turno{ativo2}" data-eleicao="6258"
+              aria-pressed="{'true' if str(padrao) == '6258' else 'false'}">2º turno</button>
+    </div>
   </header>
 
-  <main id="topo">
+  <main id="topo" data-eleicao="{servido}">
     {topo}
   </main>
 
-  {f'<div class="card"><h2>Mapa do momento</h2>{mapa}<p class="nota">Cor = candidato que lidera no estado. Opacidade = parte das seções já apuradas. Geometria pública; números do TSE.</p></div>' if mapa else ''}
+  <main id="meio">
+    {meio}
+  </main>
 
   <main id="baixo">
     {baixo}
@@ -595,24 +1255,44 @@ class Publico(BaseHTTPRequestHandler):
 
     # ----------------------------------------------------------------- rotas
     def do_GET(self):
-        caminho = (self.path or "/").split("?", 1)[0]
+        caminho = urlparse(self.path or "/").path or "/"
         if caminho in ("", "/"):
             return self._pagina()
-        if caminho == "/topo.html":
-            dados = retrato()
+        if caminho in ("/topo.html", "/meio.html", "/blocos.html"):
+            dados = _dados_para(self)
             if not dados:
                 return self._manda(b"", "text/html; charset=utf-8")
-            return self._html(bloco_topo(dados))
-        if caminho == "/blocos.html":
-            dados = retrato()
-            if not dados:
-                return self._manda(b"", "text/html; charset=utf-8")
+            if caminho == "/topo.html":
+                return self._html(bloco_topo(dados))
+            if caminho == "/meio.html":
+                return self._html(bloco_meio(dados))
             return self._html(bloco_baixo(dados, mp.resumo()))
         if caminho == "/dados.json":
+            eleicao = _eleicao_pedida(self)
+            if eleicao in ("6257", "6258"):
+                return self._json(retrato_eleicao(eleicao))
             dados = retrato()
             if not dados:
                 return self._json({"erro": "coleta em andamento"}, 503)
             return self._json(dados)
+        if caminho == "/serie.json":
+            eleicao = _eleicao_pedida(self) or "2026"
+            if eleicao == "2022":
+                return self._json({
+                    "eleicao": "2022",
+                    "turno": "1º turno (referência)",
+                    "origem": "arquivo_historico_tse",
+                    "fonte": "TSE - Histórico Totalização Presidente 1º Turno 2022",
+                    "pontos": serie_2022(),
+                })
+            dados = retrato() or _cache_el_vivo("6257") or {}
+            return self._json({
+                "eleicao": dados.get("eleicao") or eleicao,
+                "turno": dados.get("turno"),
+                "origem": "primeira_coleta",
+                "fonte": dados.get("fonte_gerada_texto"),
+                "pontos": dados.get("serie") or [],
+            })
         if caminho == "/metricas.json":
             return self._json(mp.resumo())
         if caminho == "/health":
@@ -636,7 +1316,13 @@ class Publico(BaseHTTPRequestHandler):
             metricas = mp.resumo()
         except Exception:
             metricas = {"hoje": {}, "total": {}, "regioes": [], "serie": [], "estados": []}
-        self._html(shell(retrato(), metricas, config()))
+        padrao = eleicao_padrao()
+        dados = retrato()
+        # Se o retrato em disco ainda é do outro turno, não mostre o placar
+        # errado sob o botão selecionado: o JS busca o turno padrão na hora.
+        if str((dados or {}).get("eleicao") or "") != padrao:
+            dados = _cache_el_vivo(padrao)
+        self._html(shell(dados, metricas, config(), padrao))
 
 
 # ------------------------------------------------------------- atualização

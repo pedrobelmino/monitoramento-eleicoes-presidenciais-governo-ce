@@ -1,5 +1,5 @@
 {
- "gerado_em": "2026-10-20T09:20:21-03:00",
+ "gerado_em": "2026-10-20T09:29:30-03:00",
  "fonte": "TSE — resultados.tse.jus.br (arquivos públicos por UF)",
  "fonte_gerada_texto": "05/10/2026 12:51:47",
  "eleicao": "6257",
@@ -1095,6 +1095,7 @@
   {
    "em": "2026-10-05T12:51:47",
    "coletado_em": "2026-10-20T09:20:20-03:00",
+   "origem": "primeira_coleta",
    "pct_apurado": 100.0,
    "vv": 119300788,
    "candidatos": [
@@ -1251,7 +1252,202 @@
    }
   }
  },
- "fontes_ufs": [],
- "conferencia": null,
- "erros_coleta": []
+ "fontes_ufs": [
+  {
+   "uf": "AC",
+   "nome": "Acre",
+   "regiao": "Norte",
+   "tre": "https://www.tre-ac.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/ac/ac-c0001-e006257-u.json"
+  },
+  {
+   "uf": "AP",
+   "nome": "Amapá",
+   "regiao": "Norte",
+   "tre": "https://www.tre-ap.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/ap/ap-c0001-e006257-u.json"
+  },
+  {
+   "uf": "AM",
+   "nome": "Amazonas",
+   "regiao": "Norte",
+   "tre": "https://www.tre-am.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/am/am-c0001-e006257-u.json"
+  },
+  {
+   "uf": "PA",
+   "nome": "Pará",
+   "regiao": "Norte",
+   "tre": "https://www.tre-pa.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/pa/pa-c0001-e006257-u.json"
+  },
+  {
+   "uf": "RO",
+   "nome": "Rondônia",
+   "regiao": "Norte",
+   "tre": "https://www.tre-ro.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/ro/ro-c0001-e006257-u.json"
+  },
+  {
+   "uf": "RR",
+   "nome": "Roraima",
+   "regiao": "Norte",
+   "tre": "https://www.tre-rr.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/rr/rr-c0001-e006257-u.json"
+  },
+  {
+   "uf": "TO",
+   "nome": "Tocantins",
+   "regiao": "Norte",
+   "tre": "https://www.tre-to.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/to/to-c0001-e006257-u.json"
+  },
+  {
+   "uf": "AL",
+   "nome": "Alagoas",
+   "regiao": "Nordeste",
+   "tre": "https://www.tre-al.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/al/al-c0001-e006257-u.json"
+  },
+  {
+   "uf": "BA",
+   "nome": "Bahia",
+   "regiao": "Nordeste",
+   "tre": "https://www.tre-ba.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/ba/ba-c0001-e006257-u.json"
+  },
+  {
+   "uf": "CE",
+   "nome": "Ceará",
+   "regiao": "Nordeste",
+   "tre": "https://www.tre-ce.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/ce/ce-c0001-e006257-u.json"
+  },
+  {
+   "uf": "MA",
+   "nome": "Maranhão",
+   "regiao": "Nordeste",
+   "tre": "https://www.tre-ma.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/ma/ma-c0001-e006257-u.json"
+  },
+  {
+   "uf": "PB",
+   "nome": "Paraíba",
+   "regiao": "Nordeste",
+   "tre": "https://www.tre-pb.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/pb/pb-c0001-e006257-u.json"
+  },
+  {
+   "uf": "PE",
+   "nome": "Pernambuco",
+   "regiao": "Nordeste",
+   "tre": "https://www.tre-pe.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/pe/pe-c0001-e006257-u.json"
+  },
+  {
+   "uf": "PI",
+   "nome": "Piauí",
+   "regiao": "Nordeste",
+   "tre": "https://www.tre-pi.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/pi/pi-c0001-e006257-u.json"
+  },
+  {
+   "uf": "RN",
+   "nome": "Rio Grande do Norte",
+   "regiao": "Nordeste",
+   "tre": "https://www.tre-rn.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/rn/rn-c0001-e006257-u.json"
+  },
+  {
+   "uf": "SE",
+   "nome": "Sergipe",
+   "regiao": "Nordeste",
+   "tre": "https://www.tre-se.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/se/se-c0001-e006257-u.json"
+  },
+  {
+   "uf": "DF",
+   "nome": "Distrito Federal",
+   "regiao": "Centro-Oeste",
+   "tre": "https://www.tre-df.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/df/df-c0001-e006257-u.json"
+  },
+  {
+   "uf": "GO",
+   "nome": "Goiás",
+   "regiao": "Centro-Oeste",
+   "tre": "https://www.tre-go.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/go/go-c0001-e006257-u.json"
+  },
+  {
+   "uf": "MT",
+   "nome": "Mato Grosso",
+   "regiao": "Centro-Oeste",
+   "tre": "https://www.tre-mt.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/mt/mt-c0001-e006257-u.json"
+  },
+  {
+   "uf": "MS",
+   "nome": "Mato Grosso do Sul",
+   "regiao": "Centro-Oeste",
+   "tre": "https://www.tre-ms.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/ms/ms-c0001-e006257-u.json"
+  },
+  {
+   "uf": "ES",
+   "nome": "Espírito Santo",
+   "regiao": "Sudeste",
+   "tre": "https://www.tre-es.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/es/es-c0001-e006257-u.json"
+  },
+  {
+   "uf": "MG",
+   "nome": "Minas Gerais",
+   "regiao": "Sudeste",
+   "tre": "https://www.tre-mg.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/mg/mg-c0001-e006257-u.json"
+  },
+  {
+   "uf": "RJ",
+   "nome": "Rio de Janeiro",
+   "regiao": "Sudeste",
+   "tre": "https://www.tre-rj.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/rj/rj-c0001-e006257-u.json"
+  },
+  {
+   "uf": "SP",
+   "nome": "São Paulo",
+   "regiao": "Sudeste",
+   "tre": "https://www.tre-sp.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/sp/sp-c0001-e006257-u.json"
+  },
+  {
+   "uf": "PR",
+   "nome": "Paraná",
+   "regiao": "Sul",
+   "tre": "https://www.tre-pr.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/pr/pr-c0001-e006257-u.json"
+  },
+  {
+   "uf": "SC",
+   "nome": "Santa Catarina",
+   "regiao": "Sul",
+   "tre": "https://www.tre-sc.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/sc/sc-c0001-e006257-u.json"
+  },
+  {
+   "uf": "RS",
+   "nome": "Rio Grande do Sul",
+   "regiao": "Sul",
+   "tre": "https://www.tre-rs.jus.br/",
+   "json": "https://resultados.tse.jus.br/oficial/ele2026/6257/dados/rs/rs-c0001-e006257-u.json"
+  }
+ ],
+ "conferencia": {
+  "st_nacional": 499248,
+  "st_soma_ufs": 497897,
+  "diferenca": 1351
+ },
+ "erros_coleta": [],
+ "sem_dado": false
 }
