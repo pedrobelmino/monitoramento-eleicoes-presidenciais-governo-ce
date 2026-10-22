@@ -25,6 +25,7 @@ Uso:  servidor_publico.py [porta]        (padrão 8099; PORT também vale)
 from __future__ import annotations
 
 import html
+import http.client
 import json
 import os
 import re
@@ -36,7 +37,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit
 
 AQUI = Path(__file__).resolve().parent
 sys.path.insert(0, str(AQUI))
@@ -62,6 +63,10 @@ FUSO = timezone(timedelta(hours=-3))
 # eleição encerrada não precisa ser consultada de minuto em minuto.
 INTERVALO_VIVO = int(os.environ.get("PAINEL_INTERVALO_VIVO", "120"))
 INTERVALO_PARADO = int(os.environ.get("PAINEL_INTERVALO_PARADO", "900"))
+
+# App novo (Go+React) do mapa, que já serve em /mapa/... no seu próprio nginx.
+MAPA_UPSTREAM = os.environ.get("MAPA_UPSTREAM", "http://127.0.0.1:8110")
+MAPA_TIMEOUT = float(os.environ.get("MAPA_TIMEOUT", "15"))
 
 CORES = ["#4f8cff", "#ff5a67", "#f5c542", "#3ddc97"]
 TITULO = "Eleição 2026 · Presidente"
@@ -1253,9 +1258,83 @@ class Publico(BaseHTTPRequestHandler):
                    '<p style="font-family:sans-serif">nada aqui. '
                    '<a href="/">voltar ao painel</a></p>', 404)
 
+    def _proxy_mapa(self):
+        """Proxy de /mapa... para o app Go+React (MAPA_UPSTREAM).
+
+        O caminho original é repassado sem reescrever porque o app serve em
+        /mapa/... e o nginx interno espera esse prefixo. Não usamos _manda():
+        a CSP "default-src 'none'" do painel antigo quebraria o MapLibre
+        (worker/blob e tiles externos) e deixaria a página em branco.
+        """
+        alvo = urlsplit(MAPA_UPSTREAM)
+        conexao = None
+        respondido = False
+        try:
+            if alvo.scheme == "https":
+                conexao = http.client.HTTPSConnection(
+                    alvo.hostname, alvo.port, timeout=MAPA_TIMEOUT)
+            else:
+                conexao = http.client.HTTPConnection(
+                    alvo.hostname, alvo.port, timeout=MAPA_TIMEOUT)
+            conexao.request(
+                self.command,
+                self.path or "/",
+                headers={
+                    "Host": alvo.netloc,
+                    "Accept": self.headers.get("Accept") or "*/*",
+                    "Accept-Encoding": "identity",
+                },
+            )
+            resposta = conexao.getresponse()
+            corpo = resposta.read()
+            cabecalhos = resposta.getheaders()
+            # Em HEAD o upstream não devolve corpo; guarda o tamanho real declarado.
+            tamanho_upstream = resposta.getheader("Content-Length")
+            self.send_response(resposta.status)
+            # Server e Date são emitidos pelo próprio handler; copiá-los duplicaria o cabeçalho.
+            for nome, valor in cabecalhos:
+                if nome.lower() in ("connection", "keep-alive", "transfer-encoding",
+                                    "content-length", "content-encoding", "server", "date"):
+                    continue
+                self.send_header(nome, valor)
+            if not any(nome.lower() == "cache-control" for nome, _ in cabecalhos):
+                self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length",
+                             tamanho_upstream if self.command == "HEAD" and tamanho_upstream
+                             else str(len(corpo)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            respondido = True
+            if self.command != "HEAD":
+                self.wfile.write(corpo)
+            self.close_connection = True
+        except (ConnectionRefusedError, socket.timeout, OSError,
+                http.client.HTTPException) as erro:
+            print(f"  falha no proxy /mapa: {type(erro).__name__}: {erro}", flush=True)
+            if not respondido:
+                corpo = ('<!doctype html><meta charset="utf-8">'
+                         '<title>Mapa indisponível</title>'
+                         '<p style="font-family:sans-serif">O mapa está '
+                         'temporariamente indisponível. '
+                         '<a href="/">Voltar ao painel</a></p>').encode("utf-8")
+                self.send_response(502)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(corpo)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(corpo)
+            self.close_connection = True
+        finally:
+            if conexao is not None:
+                conexao.close()
+
     # ----------------------------------------------------------------- rotas
     def do_GET(self):
         caminho = urlparse(self.path or "/").path or "/"
+        if caminho == "/mapa" or caminho.startswith("/mapa/"):
+            return self._proxy_mapa()
         if caminho in ("", "/"):
             return self._pagina()
         if caminho in ("/topo.html", "/meio.html", "/blocos.html"):
