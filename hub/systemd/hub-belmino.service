@@ -1,0 +1,28 @@
+[Unit]
+Description=Hub Belmino — portal de entrada (belmino.dev / www.belmino.dev)
+Documentation=file:///home/pedro/monitoramento-eleicoes-presidenciais-governo-ce/hub/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pedro/monitoramento-eleicoes-presidenciais-governo-ce/hub
+ExecStart=/usr/bin/python3 -u servidor_hub.py
+Environment=HUB_HOST=127.0.0.1
+Environment=HUB_PORT=8111
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=2s
+
+# Endurecimento: só escuta loopback, não escreve nada, não sobe privilégio.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=default.target
