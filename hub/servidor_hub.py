@@ -6,12 +6,14 @@ Somente biblioteca padrão do Python 3. Rotas exatas, sem frameworks.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import signal
 import sys
 import threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Sequence
 
 HOST_PADRAO = "127.0.0.1"
@@ -213,6 +215,52 @@ class ServidorHub(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
+# --- Espelho de acesso para o painel interno ---------------------------------
+# O hub (belmino.dev / www.belmino.dev) não passa pelo nginx do mapa, então sem
+# isto o painel de monitoramento nunca veria esses dois domínios. Aqui cada
+# resposta final grava UMA linha no MESMO formato do nginx do mapa:
+#
+#   IP TS STATUS METODO URI HOST BLOQ "REQUISIÇÃO CRUA" UA
+#
+# Qualquer falha de escrita é engolida: log é conveniência, a página do hub
+# nunca pode deixar de responder por causa dele.
+LOG_DEFESA = Path(
+    os.environ.get(
+        "HUB_LOG_DEFESA", "/home/pedro/eleicao2026-mapa/var/defesa/acessos.log"
+    )
+)
+_TRAVA_LOG = threading.Lock()
+
+
+def _limpar(valor: str, limite: int = 300) -> str:
+    texto = (valor or "").replace("\r", " ").replace("\n", " ")
+    texto = texto.replace('"', '\\"')
+    return texto[:limite]
+
+
+def registrar_defesa(
+    metodo: str, alvo: str, host: str, status: int, ip: str, ua: str, linha_crua: str
+) -> None:
+    try:
+        candidato = (ip or "").strip()
+        try:
+            ipaddress.ip_address(candidato)
+        except ValueError:
+            candidato = "-"
+        uri = _limpar(alvo.split("?", 1)[0], 200) or "/"
+        requisicao = _limpar(linha_crua, 240) or f"{metodo} {alvo} HTTP/1.1"
+        registro = (
+            f"{candidato} {agora_iso()} {int(status)} {_limpar(metodo, 12)} {uri} "
+            f'{_limpar(host, 120) or "-"} 0 "{requisicao}" {_limpar(ua, 180) or "-"}\n'
+        )
+        with _TRAVA_LOG:
+            LOG_DEFESA.parent.mkdir(parents=True, exist_ok=True)
+            with LOG_DEFESA.open("a", encoding="utf-8") as arquivo:
+                arquivo.write(registro)
+    except Exception:  # noqa: BLE001 - log nunca derruba o hub
+        pass
+
+
 class ManipuladorHub(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "HubBelmino/1.0"
@@ -246,6 +294,18 @@ class ManipuladorHub(BaseHTTPRequestHandler):
         extras: Sequence[tuple[str, str]] = (),
     ) -> None:
         self.send_response(status)
+        registrar_defesa(
+            metodo=getattr(self, "command", "-") or "-",
+            alvo=getattr(self, "path", "-") or "-",
+            host=(self.headers.get("Host") if self.headers else "-") or "-",
+            status=status,
+            ip=(self.headers.get("CF-Connecting-IP") if self.headers else "")
+            or self.client_address[0],
+            ua=(self.headers.get("User-Agent") if self.headers else "") or "-",
+            linha_crua=str(getattr(self, "raw_requestline", b""), "iso-8859-1").rstrip(
+                "\r\n"
+            ),
+        )
         if tipo_conteudo is not None:
             self.send_header("Content-Type", tipo_conteudo)
         for nome, valor in extras:

@@ -15,10 +15,13 @@ Restart=on-failure
 RestartSec=2s
 
 # Endurecimento: só escuta loopback, não escreve nada, não sobe privilégio.
+# A ÚNICA exceção de escrita é o espelho de acesso do painel interno
+# (<repo do mapa>/var/defesa) — uma linha por resposta, sem IP de terceiro.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
+ReadWritePaths=/home/pedro/eleicao2026-mapa/var/defesa
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=yes
 LockPersonality=yes
