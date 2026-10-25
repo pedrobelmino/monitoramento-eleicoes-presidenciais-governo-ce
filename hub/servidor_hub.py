@@ -28,6 +28,9 @@ CABECALHOS_SEGURANCA: tuple[tuple[str, str], ...] = (
         "base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
     ),
     ("X-Frame-Options", "DENY"),
+    # HSTS: o hub só é alcançado por HTTPS (o TLS termina no túnel Cloudflare).
+    # Fixa o navegador em HTTPS por um ano, subdomínios incluídos.
+    ("Strict-Transport-Security", "max-age=31536000; includeSubDomains"),
 )
 
 PAGINA_INICIAL = """<!doctype html>
@@ -199,7 +202,7 @@ CORPO_SAUDE = b'{"ok":true}'
 CORPO_NAO_ENCONTRADO = b"not found"
 
 REDIRECIONAMENTOS = {
-    "/sobre": "https://eleicao2026.belmino.dev/",
+    "/sobre": "https://eleicao2026.belmino.dev/sobre",
     "/eleicao": "https://eleicao2026.belmino.dev/eleicao",
     "/mapa": "https://eleicao2026.belmino.dev/mapa",
 }
