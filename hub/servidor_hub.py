@@ -164,9 +164,8 @@ PAGINA_INICIAL = """<!doctype html>
   <main>
     <header>
       <p class="kicker">Belmino · Hub pessoal</p>
-      <h1>Um ponto de entrada.<br>Três caminhos.</h1>
-      <p class="lede">Portal enxuto para chegar ao perfil, ao acompanhamento da eleição de 2026
-      e ao mapa interativo.</p>
+      <h1>Um ponto de entrada.<br>Dois caminhos.</h1>
+      <p class="lede">Portal enxuto: quem eu sou e o portfólio de projetos em produção.</p>
     </header>
 
     <nav class="cartoes" aria-label="Seções do hub">
@@ -177,17 +176,10 @@ PAGINA_INICIAL = """<!doctype html>
         <span class="abrir">Abrir <span class="seta" aria-hidden="true">→</span></span>
       </a>
 
-      <a class="cartao" href="/eleicao">
+      <a class="cartao" href="https://eleicao2026.belmino.dev/sobre#portfolio">
         <span class="numero">02</span>
-        <span class="titulo">Eleição 2026 ao vivo</span>
-        <span class="descricao">Acompanhamento em tempo real do cenário eleitoral.</span>
-        <span class="abrir">Abrir <span class="seta" aria-hidden="true">→</span></span>
-      </a>
-
-      <a class="cartao" href="/mapa">
-        <span class="numero">03</span>
-        <span class="titulo">Mapa interativo</span>
-        <span class="descricao">Visualização geográfica dos dados e resultados.</span>
+        <span class="titulo">Portfólio</span>
+        <span class="descricao">Produtos em produção — Eleição 2026: acompanhamento da apuração e mapa interativo.</span>
         <span class="abrir">Abrir <span class="seta" aria-hidden="true">→</span></span>
       </a>
     </nav>
